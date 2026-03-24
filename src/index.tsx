@@ -716,28 +716,32 @@ const app = {
   renderMatrix() {
     const container = document.getElementById('view-matrix');
     
-    // Build rows by step (1~6)
-    const steps = [1, 2, 3, 4, 5, 6];
-    
-    let html = '<table class="matrix-table"><thead><tr><th class="vc-header">Step</th>';
+    // 각 산업별 밸류체인 목록을 미리 그룹핑
+    const industryVcs = {};
     this.industries.forEach(ind => {
-      html += \`<th><span class="text-lg">\${ind.icon}</span><br>\${ind.code}</th>\`;
+      industryVcs[ind.id] = this.matrixSummary.filter(r => r.industry_id === ind.id);
+    });
+    const maxRows = Math.max(...Object.values(industryVcs).map(vcs => vcs.length), 1);
+    
+    let html = '<table class="matrix-table"><thead><tr>';
+    this.industries.forEach(ind => {
+      const totalPocs = (industryVcs[ind.id] || []).reduce((s, r) => s + (r.poc_count || 0), 0);
+      html += \`<th>
+        <span class="text-lg">\${ind.icon}</span><br>
+        <span class="text-white/80">\${ind.name_ko}</span><br>
+        <span class="text-[10px] text-white/30">\${ind.code} · \${totalPocs} PoC</span>
+      </th>\`;
     });
     html += '</tr></thead><tbody>';
 
-    steps.forEach(step => {
+    for (let row = 0; row < maxRows; row++) {
       html += '<tr>';
-      // Row header: step number
-      html += \`<td class="vc-header text-white/40">Step \${step}</td>\`;
-      
       this.industries.forEach(ind => {
-        const vcData = this.matrixSummary.find(r => r.industry_id === ind.id && r.vc_name && 
-          this.matrixSummary.filter(x => x.industry_id === ind.id).indexOf(r) === step - 1
-        );
-        const vcForStep = this.matrixSummary.filter(r => r.industry_id === ind.id)[step - 1];
+        const vcs = industryVcs[ind.id] || [];
+        const vcForRow = vcs[row];
         
-        if (vcForStep) {
-          const count = vcForStep.poc_count || 0;
+        if (vcForRow) {
+          const count = vcForRow.poc_count || 0;
           const intensity = Math.min(count / 5, 1);
           const bg = count > 0 
             ? \`rgba(\${this.hexToRgb(ind.color)}, \${0.1 + intensity * 0.4})\`
@@ -745,13 +749,12 @@ const app = {
           const cellClass = count > 0 ? '' : 'empty';
           
           html += \`<td class="matrix-cell \${cellClass}" style="background:\${bg}" 
-                       onclick="app.drilldownCell('\${ind.code}', '\${vcForStep.vc_id}')"
-                       title="\${vcForStep.vc_name}: \${count}개 PoC">
-            <div class="tooltip">\${vcForStep.vc_name}<br>\${count}개 PoC</div>
-            <div class="text-[10px] text-white/50 mb-1 truncate">\${vcForStep.vc_name}</div>
+                       onclick="app.drilldownCell('\${ind.code}', '\${vcForRow.vc_id}')">
+            <div class="tooltip">\${vcForRow.vc_name}: \${count}개 PoC</div>
+            <div class="text-[11px] text-white/70 mb-1 font-medium">\${vcForRow.vc_name}</div>
             \${count > 0 
-              ? \`<div class="text-lg font-bold">\${count}</div><div class="flex justify-center gap-0.5 mt-1">\${this.renderDots(vcForStep)}</div>\`
-              : '<div class="text-white/15 text-xs">—</div>'
+              ? \`<div class="text-lg font-bold">\${count}</div><div class="flex justify-center gap-0.5 mt-1">\${this.renderDots(vcForRow)}</div>\`
+              : '<div class="text-white/15 text-xs mt-1">—</div>'
             }
           </td>\`;
         } else {
@@ -759,7 +762,7 @@ const app = {
         }
       });
       html += '</tr>';
-    });
+    }
 
     html += '</tbody></table>';
     container.innerHTML = html;
