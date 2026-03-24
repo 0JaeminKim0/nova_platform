@@ -2,10 +2,9 @@ module.exports = {
   apps: [
     {
       name: 'nova-poc',
-      script: 'npx',
-      args: 'wrangler pages dev dist --d1=nova-poc-production --local --ip 0.0.0.0 --port 3000',
+      script: 'dist/server.mjs',
       env: {
-        NODE_ENV: 'development',
+        NODE_ENV: 'production',
         PORT: 3000
       },
       watch: false,

@@ -1,11 +1,8 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { DB } from './db'
 
-type Bindings = {
-  DB: D1Database
-}
-
-const app = new Hono<{ Bindings: Bindings }>()
+const app = new Hono()
 
 app.use('/api/*', cors())
 
@@ -13,8 +10,8 @@ app.use('/api/*', cors())
 
 // 산업군 목록 + 각 산업의 PoC 수
 app.get('/api/industries', async (c) => {
-  const db = c.env.DB
-  const industries = await db.prepare(`
+
+  const industries = await DB.prepare(`
     SELECT i.*, 
       (SELECT COUNT(DISTINCT pvm.poc_id) FROM poc_value_chain_map pvm WHERE pvm.industry_id = i.id) as poc_count,
       (SELECT COUNT(*) FROM value_chain vc WHERE vc.industry_id = i.id) as vc_count
@@ -26,12 +23,12 @@ app.get('/api/industries', async (c) => {
 // 특정 산업의 밸류체인 + 각 체인의 PoC 수
 app.get('/api/industries/:code/value-chains', async (c) => {
   const code = c.req.param('code')
-  const db = c.env.DB
+
   
-  const industry = await db.prepare('SELECT * FROM industry WHERE code = ?').bind(code).first()
+  const industry = await DB.prepare('SELECT * FROM industry WHERE code = ?').bind(code).first()
   if (!industry) return c.json({ success: false, error: 'Industry not found' }, 404)
 
-  const chains = await db.prepare(`
+  const chains = await DB.prepare(`
     SELECT vc.*,
       (SELECT COUNT(*) FROM poc_value_chain_map pvm WHERE pvm.value_chain_id = vc.id) as poc_count
     FROM value_chain vc 
@@ -44,9 +41,9 @@ app.get('/api/industries/:code/value-chains', async (c) => {
 
 // 전체 매트릭스 요약 (조감도용) — MUST be before :industryCode
 app.get('/api/matrix/summary', async (c) => {
-  const db = c.env.DB
+
   
-  const summary = await db.prepare(`
+  const summary = await DB.prepare(`
     SELECT i.id as industry_id, i.code as industry_code, i.name_ko, i.icon, i.color,
            vc.id as vc_id, vc.name as vc_name, vc.order_seq,
            COUNT(pvm.id) as poc_count,
@@ -68,16 +65,16 @@ app.get('/api/matrix/summary', async (c) => {
 // 바둑판 매트릭스 데이터 — 특정 산업의 밸류체인별 PoC 전체
 app.get('/api/matrix/:industryCode', async (c) => {
   const code = c.req.param('industryCode')
-  const db = c.env.DB
 
-  const industry = await db.prepare('SELECT * FROM industry WHERE code = ?').bind(code).first()
+
+  const industry = await DB.prepare('SELECT * FROM industry WHERE code = ?').bind(code).first()
   if (!industry) return c.json({ success: false, error: 'Industry not found' }, 404)
 
-  const chains = await db.prepare(`
+  const chains = await DB.prepare(`
     SELECT * FROM value_chain WHERE industry_id = ? ORDER BY order_seq
   `).bind((industry as any).id).all()
 
-  const mappings = await db.prepare(`
+  const mappings = await DB.prepare(`
     SELECT pvm.*, ap.poc_code, ap.name as poc_name, ap.category, ap.core_value,
            ap.tech_stack, ap.status as poc_status, ap.maturity_level, ap.description as poc_description,
            ap.demo_url, ap.config_schema as links_json,
@@ -103,28 +100,28 @@ app.get('/api/matrix/:industryCode', async (c) => {
 
 // 전체 PoC 목록
 app.get('/api/pocs', async (c) => {
-  const db = c.env.DB
-  const pocs = await db.prepare('SELECT * FROM agent_poc WHERE is_active = 1 ORDER BY poc_code').all()
+
+  const pocs = await DB.prepare('SELECT * FROM agent_poc WHERE is_active = 1 ORDER BY poc_code').all()
   return c.json({ success: true, data: pocs.results })
 })
 
 // PoC 상세
 app.get('/api/pocs/:code', async (c) => {
   const code = c.req.param('code')
-  const db = c.env.DB
 
-  const poc = await db.prepare('SELECT * FROM agent_poc WHERE poc_code = ?').bind(code).first()
+
+  const poc = await DB.prepare('SELECT * FROM agent_poc WHERE poc_code = ?').bind(code).first()
   if (!poc) return c.json({ success: false, error: 'POC not found' }, 404)
 
-  const steps = await db.prepare('SELECT * FROM agent_step WHERE poc_id = ? ORDER BY step_seq').bind((poc as any).id).all()
+  const steps = await DB.prepare('SELECT * FROM agent_step WHERE poc_id = ? ORDER BY step_seq').bind((poc as any).id).all()
   
-  const industries = await db.prepare(`
+  const industries = await DB.prepare(`
     SELECT i.*, pim.relevance 
     FROM poc_industry_map pim JOIN industry i ON pim.industry_id = i.id 
     WHERE pim.poc_id = ? ORDER BY pim.relevance DESC
   `).bind((poc as any).id).all()
 
-  const deployments = await db.prepare(`
+  const deployments = await DB.prepare(`
     SELECT pvm.*, vc.name as vc_name, i.name_ko as industry_name, i.code as industry_code
     FROM poc_value_chain_map pvm
     JOIN value_chain vc ON pvm.value_chain_id = vc.id
@@ -140,21 +137,21 @@ app.get('/api/pocs/:code', async (c) => {
 
 // 셀에 PoC 배포 (바둑판 칸에 서비스 등록)
 app.post('/api/matrix/deploy', async (c) => {
-  const db = c.env.DB
+
   const body = await c.req.json()
   const { poc_id, industry_id, value_chain_id, deploy_status, deploy_note } = body
 
   const id = `map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   
   try {
-    await db.prepare(`
+    await DB.prepare(`
       INSERT INTO poc_value_chain_map (id, poc_id, industry_id, value_chain_id, deploy_status, deploy_note)
       VALUES (?, ?, ?, ?, ?, ?)
     `).bind(id, poc_id, industry_id, value_chain_id, deploy_status || 'registered', deploy_note || '').run()
 
     // 배포 로그 기록
     const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    await db.prepare(`
+    await DB.prepare(`
       INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, user_note)
       VALUES (?, ?, ?, ?, 'deploy', ?)
     `).bind(logId, poc_id, industry_id, value_chain_id, deploy_note || '').run()
@@ -170,16 +167,16 @@ app.post('/api/matrix/deploy', async (c) => {
 
 // 셀에서 PoC 제거
 app.delete('/api/matrix/deploy/:id', async (c) => {
-  const db = c.env.DB
+
   const id = c.req.param('id')
 
-  const existing = await db.prepare('SELECT * FROM poc_value_chain_map WHERE id = ?').bind(id).first()
+  const existing = await DB.prepare('SELECT * FROM poc_value_chain_map WHERE id = ?').bind(id).first()
   if (!existing) return c.json({ success: false, error: 'Not found' }, 404)
 
-  await db.prepare('DELETE FROM poc_value_chain_map WHERE id = ?').bind(id).run()
+  await DB.prepare('DELETE FROM poc_value_chain_map WHERE id = ?').bind(id).run()
 
   const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  await db.prepare(`
+  await DB.prepare(`
     INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, user_note)
     VALUES (?, ?, ?, ?, 'undeploy', 'Removed from matrix')
   `).bind(logId, (existing as any).poc_id, (existing as any).industry_id, (existing as any).value_chain_id).run()
@@ -189,11 +186,11 @@ app.delete('/api/matrix/deploy/:id', async (c) => {
 
 // 배포 상태 업데이트
 app.patch('/api/matrix/deploy/:id', async (c) => {
-  const db = c.env.DB
+
   const id = c.req.param('id')
   const { deploy_status, deploy_note } = await c.req.json()
 
-  await db.prepare(`
+  await DB.prepare(`
     UPDATE poc_value_chain_map SET deploy_status = ?, deploy_note = ?, deployed_at = datetime('now') WHERE id = ?
   `).bind(deploy_status, deploy_note || '', id).run()
 
@@ -202,7 +199,7 @@ app.patch('/api/matrix/deploy/:id', async (c) => {
 
 // ZIP 업로드 또는 링크로 새 PoC 등록
 app.post('/api/pocs/upload', async (c) => {
-  const db = c.env.DB
+
   const contentType = c.req.header('content-type') || ''
   
   let name: string, category: string, description: string, core_value: string
@@ -246,7 +243,7 @@ app.post('/api/pocs/upload', async (c) => {
   }
 
   // Generate poc_code
-  const countResult = await db.prepare('SELECT COUNT(*) as cnt FROM agent_poc').first() as any
+  const countResult = await DB.prepare('SELECT COUNT(*) as cnt FROM agent_poc').first() as any
   const nextNum = (countResult?.cnt || 14) + 1
   const pocCode = `POC-${String(nextNum).padStart(3, '0')}`
   const pocId = `poc-${String(nextNum).padStart(3, '0')}`
@@ -259,7 +256,7 @@ app.post('/api/pocs/upload', async (c) => {
   const linksJson = JSON.stringify({ demo_url, repo_url, doc_url })
 
   // Insert PoC
-  await db.prepare(`
+  await DB.prepare(`
     INSERT INTO agent_poc (id, poc_code, name, category, description, core_value, tech_stack, status, maturity_level, demo_url, config_schema, is_active)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
   `).bind(pocId, pocCode, name, category, description, core_value, techStackJson, deploy_status, demo_url, linksJson).run()
@@ -268,7 +265,7 @@ app.post('/api/pocs/upload', async (c) => {
   if (industry_ids) {
     const ids = industry_ids.split(',').map(s => s.trim())
     for (const indId of ids) {
-      await db.prepare(`
+      await DB.prepare(`
         INSERT OR IGNORE INTO poc_industry_map (poc_id, industry_id, relevance) VALUES (?, ?, 3)
       `).bind(pocId, indId).run()
     }
@@ -280,10 +277,10 @@ app.post('/api/pocs/upload', async (c) => {
     const indIds = industry_ids.split(',').map(s => s.trim())
     for (const indId of indIds) {
       for (const vcId of vcIds) {
-        const vc = await db.prepare('SELECT id FROM value_chain WHERE id = ? AND industry_id = ?').bind(vcId, indId).first()
+        const vc = await DB.prepare('SELECT id FROM value_chain WHERE id = ? AND industry_id = ?').bind(vcId, indId).first()
         if (vc) {
           const mapId = `map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-          await db.prepare(`
+          await DB.prepare(`
             INSERT OR IGNORE INTO poc_value_chain_map (id, poc_id, industry_id, value_chain_id, deploy_status)
             VALUES (?, ?, ?, ?, ?)
           `).bind(mapId, pocId, indId, vcId, deploy_status).run()
@@ -300,7 +297,7 @@ app.post('/api/pocs/upload', async (c) => {
   }
   const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const logMeta = JSON.stringify({ file: fileInfo, demo_url, repo_url, doc_url })
-  await db.prepare(`
+  await DB.prepare(`
     INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, file_name, file_size, metadata)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(logId, pocId, industry_ids?.split(',')[0] || '', value_chain_ids?.split(',')[0] || '',
@@ -314,8 +311,8 @@ app.post('/api/pocs/upload', async (c) => {
 
 // 배포 이력 조회
 app.get('/api/deployments', async (c) => {
-  const db = c.env.DB
-  const logs = await db.prepare(`
+
+  const logs = await DB.prepare(`
     SELECT dl.*, ap.poc_code, ap.name as poc_name, i.name_ko as industry_name, vc.name as vc_name
     FROM deployment_log dl
     LEFT JOIN agent_poc ap ON dl.poc_id = ap.id
