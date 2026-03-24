@@ -80,6 +80,7 @@ app.get('/api/matrix/:industryCode', async (c) => {
   const mappings = await db.prepare(`
     SELECT pvm.*, ap.poc_code, ap.name as poc_name, ap.category, ap.core_value,
            ap.tech_stack, ap.status as poc_status, ap.maturity_level, ap.description as poc_description,
+           ap.demo_url, ap.config_schema as links_json,
            vc.name as vc_name, vc.code as vc_code
     FROM poc_value_chain_map pvm
     JOIN agent_poc ap ON pvm.poc_id = ap.id
@@ -199,20 +200,46 @@ app.patch('/api/matrix/deploy/:id', async (c) => {
   return c.json({ success: true })
 })
 
-// ZIP 업로드로 새 PoC 등록
+// ZIP 업로드 또는 링크로 새 PoC 등록
 app.post('/api/pocs/upload', async (c) => {
   const db = c.env.DB
-  const formData = await c.req.formData()
+  const contentType = c.req.header('content-type') || ''
   
-  const file = formData.get('file') as File | null
-  const name = formData.get('name') as string
-  const category = formData.get('category') as string
-  const description = formData.get('description') as string
-  const core_value = formData.get('core_value') as string
-  const tech_stack = formData.get('tech_stack') as string // comma separated
-  const industry_ids = formData.get('industry_ids') as string // comma separated
-  const value_chain_ids = formData.get('value_chain_ids') as string // comma separated
-  const deploy_status = (formData.get('deploy_status') as string) || 'registered'
+  let name: string, category: string, description: string, core_value: string
+  let tech_stack: string, industry_ids: string, value_chain_ids: string
+  let deploy_status: string, demo_url: string, repo_url: string, doc_url: string
+  let file: File | null = null
+
+  if (contentType.includes('application/json')) {
+    // JSON body (링크 등록)
+    const body = await c.req.json()
+    name = body.name
+    category = body.category
+    description = body.description || ''
+    core_value = body.core_value || ''
+    tech_stack = body.tech_stack || ''
+    industry_ids = body.industry_ids || ''
+    value_chain_ids = body.value_chain_ids || ''
+    deploy_status = body.deploy_status || 'registered'
+    demo_url = body.demo_url || ''
+    repo_url = body.repo_url || ''
+    doc_url = body.doc_url || ''
+  } else {
+    // FormData (ZIP 업로드)
+    const formData = await c.req.formData()
+    file = formData.get('file') as File | null
+    name = formData.get('name') as string
+    category = formData.get('category') as string
+    description = (formData.get('description') as string) || ''
+    core_value = (formData.get('core_value') as string) || ''
+    tech_stack = (formData.get('tech_stack') as string) || ''
+    industry_ids = (formData.get('industry_ids') as string) || ''
+    value_chain_ids = (formData.get('value_chain_ids') as string) || ''
+    deploy_status = (formData.get('deploy_status') as string) || 'registered'
+    demo_url = (formData.get('demo_url') as string) || ''
+    repo_url = (formData.get('repo_url') as string) || ''
+    doc_url = (formData.get('doc_url') as string) || ''
+  }
 
   if (!name || !category) {
     return c.json({ success: false, error: 'name과 category는 필수입니다.' }, 400)
@@ -228,11 +255,14 @@ app.post('/api/pocs/upload', async (c) => {
     ? JSON.stringify(tech_stack.split(',').map((s: string) => s.trim()))
     : '[]'
 
+  // 링크 정보를 config_schema에 저장
+  const linksJson = JSON.stringify({ demo_url, repo_url, doc_url })
+
   // Insert PoC
   await db.prepare(`
-    INSERT INTO agent_poc (id, poc_code, name, category, description, core_value, tech_stack, status, maturity_level, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
-  `).bind(pocId, pocCode, name, category, description || '', core_value || '', techStackJson, deploy_status).run()
+    INSERT INTO agent_poc (id, poc_code, name, category, description, core_value, tech_stack, status, maturity_level, demo_url, config_schema, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
+  `).bind(pocId, pocCode, name, category, description, core_value, techStackJson, deploy_status, demo_url, linksJson).run()
 
   // Insert industry mappings
   if (industry_ids) {
@@ -250,7 +280,6 @@ app.post('/api/pocs/upload', async (c) => {
     const indIds = industry_ids.split(',').map(s => s.trim())
     for (const indId of indIds) {
       for (const vcId of vcIds) {
-        // Verify the vc belongs to the industry
         const vc = await db.prepare('SELECT id FROM value_chain WHERE id = ? AND industry_id = ?').bind(vcId, indId).first()
         if (vc) {
           const mapId = `map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -263,21 +292,23 @@ app.post('/api/pocs/upload', async (c) => {
     }
   }
 
-  // Log file info if uploaded
+  // Log
   let fileInfo = null
+  const logAction = file ? 'upload' : (demo_url || repo_url || doc_url) ? 'link' : 'register'
   if (file) {
     fileInfo = { name: file.name, size: file.size, type: file.type }
-    const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    await db.prepare(`
-      INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, file_name, file_size, metadata)
-      VALUES (?, ?, ?, ?, 'upload', ?, ?, ?)
-    `).bind(logId, pocId, industry_ids?.split(',')[0] || '', value_chain_ids?.split(',')[0] || '', 
-      file.name, file.size, JSON.stringify(fileInfo)).run()
   }
+  const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const logMeta = JSON.stringify({ file: fileInfo, demo_url, repo_url, doc_url })
+  await db.prepare(`
+    INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, file_name, file_size, metadata)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(logId, pocId, industry_ids?.split(',')[0] || '', value_chain_ids?.split(',')[0] || '',
+    logAction, file?.name || demo_url || '', file?.size || 0, logMeta).run()
 
   return c.json({ 
     success: true, 
-    data: { poc_id: pocId, poc_code: pocCode, file: fileInfo }
+    data: { poc_id: pocId, poc_code: pocCode, file: fileInfo, links: { demo_url, repo_url, doc_url } }
   })
 })
 
@@ -412,6 +443,9 @@ function getStyleCSS(): string {
 
 .view-btn { color: rgba(255,255,255,0.5); }
 .view-btn.active { background: rgba(59,130,246,0.3); color: white; }
+
+.upload-tab { color: rgba(255,255,255,0.4); }
+.upload-tab.active { background: rgba(59,130,246,0.3); color: white; }
 
 .industry-card {
   background: rgba(255,255,255,0.03);
@@ -812,7 +846,9 @@ const app = {
             <span class="text-xs text-white/40 ml-auto">\${vc.pocs.length}개 PoC</span>
           </div>
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            \${vc.pocs.map(p => \`
+            \${vc.pocs.map(p => {
+              const links = (() => { try { return JSON.parse(p.links_json || '{}'); } catch { return {}; } })();
+              return \`
               <div class="drilldown-card">
                 <div class="flex items-start justify-between mb-2">
                   <span class="status-badge \${this.statusClass(p.deploy_status)}">\${this.statusIcon(p.deploy_status)} \${this.statusLabel(p.deploy_status)}</span>
@@ -820,12 +856,19 @@ const app = {
                 </div>
                 <div class="font-medium text-sm mb-1">\${p.poc_name}</div>
                 <div class="text-[10px] text-white/40 mb-2">\${p.poc_code} · \${p.category}</div>
-                <div class="text-xs text-white/50">\${p.core_value || ''}</div>
-                <div class="flex gap-1 mt-2 flex-wrap">
+                <div class="text-xs text-white/50 mb-2">\${p.core_value || ''}</div>
+                \${(p.demo_url || links.repo_url || links.doc_url) ? \`
+                  <div class="flex gap-1.5 mb-2 flex-wrap">
+                    \${p.demo_url ? \`<a href="\${p.demo_url}" target="_blank" onclick="event.stopPropagation()" class="text-[10px] px-2 py-1 rounded-md bg-blue-500/15 text-blue-400 hover:bg-blue-500/25 transition flex items-center gap-1"><i class="fas fa-external-link-alt"></i> Demo</a>\` : ''}
+                    \${links.repo_url ? \`<a href="\${links.repo_url}" target="_blank" onclick="event.stopPropagation()" class="text-[10px] px-2 py-1 rounded-md bg-white/5 text-white/50 hover:bg-white/10 transition flex items-center gap-1"><i class="fab fa-github"></i> Repo</a>\` : ''}
+                    \${links.doc_url ? \`<a href="\${links.doc_url}" target="_blank" onclick="event.stopPropagation()" class="text-[10px] px-2 py-1 rounded-md bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition flex items-center gap-1"><i class="fas fa-book"></i> Docs</a>\` : ''}
+                  </div>
+                \` : ''}
+                <div class="flex gap-1 mt-1 flex-wrap">
                   \${(JSON.parse(p.tech_stack || '[]')).map(t => \`<span class="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-white/40">\${t}</span>\`).join('')}
                 </div>
               </div>
-            \`).join('')}
+            \`; }).join('')}
             
             <div class="deploy-btn" onclick="app.showDeployModal('\${industry.id}', '\${vcId}', '\${industry.code}')">
               <i class="fas fa-plus"></i> 서비스 등록
@@ -896,9 +939,9 @@ const app = {
         </div>
 
         <div class="border-t border-white/10 pt-4 mt-4">
-          <p class="text-xs text-white/40 mb-3">또는 새 PoC를 ZIP 파일로 업로드</p>
+          <p class="text-xs text-white/40 mb-3">또는 새 PoC를 등록 (링크 또는 ZIP)</p>
           <button onclick="app.closeModal(); app.showUploadModal('\${industryId}', '\${vcId}')" class="w-full py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-white/60 border border-dashed border-white/15">
-            <i class="fas fa-cloud-upload-alt mr-1"></i> ZIP으로 새 PoC 업로드
+            <i class="fas fa-plus-circle mr-1"></i> 새 PoC 등록 (링크 / ZIP)
           </button>
         </div>
 
@@ -945,27 +988,62 @@ const app = {
     if (industryCode) await this.drilldown(industryCode);
   },
 
-  // ===== Upload Modal (ZIP 업로드) =====
+  // ===== Upload Modal (ZIP 업로드 + 링크 등록) =====
+  uploadMode: 'link', // 'zip' or 'link'
+
   showUploadModal(preIndustryId, preVcId) {
     const modal = document.getElementById('modal-overlay');
     const content = document.getElementById('modal-content');
     modal.classList.remove('hidden');
+    this.uploadMode = 'link';
 
     content.innerHTML = \`
       <div class="p-6">
-        <div class="flex items-center justify-between mb-6">
-          <h3 class="text-lg font-bold"><i class="fas fa-cloud-upload-alt text-blue-400 mr-2"></i>새 PoC 업로드</h3>
+        <div class="flex items-center justify-between mb-5">
+          <h3 class="text-lg font-bold"><i class="fas fa-plus-circle text-blue-400 mr-2"></i>새 PoC 등록</h3>
           <button onclick="app.closeModal()" class="p-1 hover:bg-white/10 rounded"><i class="fas fa-times"></i></button>
         </div>
 
-        <div class="drop-zone mb-4" id="drop-zone" ondrop="app.handleDrop(event)" ondragover="app.handleDragOver(event)" ondragleave="app.handleDragLeave(event)">
-          <i class="fas fa-file-archive text-3xl text-white/20 mb-3"></i>
-          <p class="text-sm text-white/40 mb-2">ZIP 파일을 드래그하거나 클릭하여 선택</p>
-          <input type="file" id="upload-file" accept=".zip" onchange="app.handleFileSelect(event)" class="hidden">
-          <button onclick="document.getElementById('upload-file').click()" class="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm">파일 선택</button>
-          <div id="file-info" class="mt-2 text-xs text-white/40 hidden"></div>
+        <!-- 탭 전환: 링크 / ZIP -->
+        <div class="flex bg-white/5 rounded-lg p-1 mb-5">
+          <button id="tab-link" onclick="app.switchUploadTab('link')" class="flex-1 px-4 py-2.5 rounded-md text-sm font-medium transition flex items-center justify-center gap-2 upload-tab active">
+            <i class="fas fa-link"></i> 링크로 등록
+          </button>
+          <button id="tab-zip" onclick="app.switchUploadTab('zip')" class="flex-1 px-4 py-2.5 rounded-md text-sm font-medium transition flex items-center justify-center gap-2 upload-tab">
+            <i class="fas fa-file-archive"></i> ZIP 업로드
+          </button>
         </div>
 
+        <!-- 링크 입력 영역 -->
+        <div id="section-link" class="mb-4">
+          <div class="space-y-3 p-4 bg-white/3 rounded-xl border border-white/8">
+            <div>
+              <label class="text-xs text-white/60 mb-1 flex items-center gap-1.5"><i class="fas fa-globe text-blue-400"></i> 데모 URL / 서비스 링크</label>
+              <input id="up-demo-url" class="w-full bg-white/5 border border-white/10 rounded-lg p-2.5 text-sm" placeholder="https://my-poc-demo.example.com">
+            </div>
+            <div>
+              <label class="text-xs text-white/60 mb-1 flex items-center gap-1.5"><i class="fab fa-github text-white/60"></i> Git Repository URL</label>
+              <input id="up-repo-url" class="w-full bg-white/5 border border-white/10 rounded-lg p-2.5 text-sm" placeholder="https://github.com/org/repo">
+            </div>
+            <div>
+              <label class="text-xs text-white/60 mb-1 flex items-center gap-1.5"><i class="fas fa-book text-amber-400"></i> 문서 / API Docs URL</label>
+              <input id="up-doc-url" class="w-full bg-white/5 border border-white/10 rounded-lg p-2.5 text-sm" placeholder="https://docs.example.com/api">
+            </div>
+          </div>
+        </div>
+
+        <!-- ZIP 업로드 영역 (기본 숨김) -->
+        <div id="section-zip" class="mb-4 hidden">
+          <div class="drop-zone" id="drop-zone" ondrop="app.handleDrop(event)" ondragover="app.handleDragOver(event)" ondragleave="app.handleDragLeave(event)">
+            <i class="fas fa-file-archive text-3xl text-white/20 mb-3"></i>
+            <p class="text-sm text-white/40 mb-2">ZIP 파일을 드래그하거나 클릭하여 선택</p>
+            <input type="file" id="upload-file" accept=".zip" onchange="app.handleFileSelect(event)" class="hidden">
+            <button onclick="document.getElementById('upload-file').click()" class="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm">파일 선택</button>
+            <div id="file-info" class="mt-2 text-xs text-white/40 hidden"></div>
+          </div>
+        </div>
+
+        <!-- 공통 필드 -->
         <div class="grid grid-cols-2 gap-3 mb-3">
           <div>
             <label class="text-xs text-white/60 mb-1 block">PoC 이름 *</label>
@@ -1042,6 +1120,14 @@ const app = {
     }, 100);
   },
 
+  switchUploadTab(mode) {
+    this.uploadMode = mode;
+    document.getElementById('section-link').classList.toggle('hidden', mode !== 'link');
+    document.getElementById('section-zip').classList.toggle('hidden', mode !== 'zip');
+    document.querySelectorAll('.upload-tab').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + mode).classList.add('active');
+  },
+
   async updateVcList(preVcId) {
     const checked = [...document.querySelectorAll('.ind-check:checked')].map(c => c.value);
     const container = document.getElementById('up-vc-list');
@@ -1098,21 +1184,44 @@ const app = {
     const category = document.getElementById('up-category').value;
     if (!name) return alert('PoC 이름을 입력해주세요.');
 
-    const fd = new FormData();
-    if (this.selectedFile) fd.append('file', this.selectedFile);
-    fd.append('name', name);
-    fd.append('category', category);
-    fd.append('description', document.getElementById('up-desc').value.trim());
-    fd.append('core_value', document.getElementById('up-corevalue').value.trim());
-    fd.append('tech_stack', document.getElementById('up-tech').value.trim());
-    
     const indIds = [...document.querySelectorAll('.ind-check:checked')].map(c => c.value).join(',');
     const vcIds = [...document.querySelectorAll('.vc-check:checked')].map(c => c.value).join(',');
-    fd.append('industry_ids', indIds);
-    fd.append('value_chain_ids', vcIds);
-    fd.append('deploy_status', document.querySelector('input[name="up-status"]:checked')?.value || 'registered');
+    const deployStatus = document.querySelector('input[name="up-status"]:checked')?.value || 'registered';
+    const description = document.getElementById('up-desc').value.trim();
+    const coreValue = document.getElementById('up-corevalue').value.trim();
+    const techStack = document.getElementById('up-tech').value.trim();
 
-    const res = await fetch('/api/pocs/upload', { method: 'POST', body: fd });
+    let res;
+
+    if (this.uploadMode === 'link') {
+      // 링크 등록 — JSON body
+      const body = {
+        name, category, description, core_value: coreValue, tech_stack: techStack,
+        industry_ids: indIds, value_chain_ids: vcIds, deploy_status: deployStatus,
+        demo_url: document.getElementById('up-demo-url')?.value.trim() || '',
+        repo_url: document.getElementById('up-repo-url')?.value.trim() || '',
+        doc_url: document.getElementById('up-doc-url')?.value.trim() || ''
+      };
+      res = await fetch('/api/pocs/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } else {
+      // ZIP 업로드 — FormData
+      const fd = new FormData();
+      if (this.selectedFile) fd.append('file', this.selectedFile);
+      fd.append('name', name);
+      fd.append('category', category);
+      fd.append('description', description);
+      fd.append('core_value', coreValue);
+      fd.append('tech_stack', techStack);
+      fd.append('industry_ids', indIds);
+      fd.append('value_chain_ids', vcIds);
+      fd.append('deploy_status', deployStatus);
+      res = await fetch('/api/pocs/upload', { method: 'POST', body: fd });
+    }
+
     const json = await res.json();
 
     if (json.success) {
@@ -1125,7 +1234,7 @@ const app = {
       if (this.expandedIndustry) await this.drilldown(this.expandedIndustry);
       alert(\`\\u2705 \${json.data.poc_code} 등록 완료!\`);
     } else {
-      alert(json.error || '업로드 실패');
+      alert(json.error || '등록 실패');
     }
   },
 
