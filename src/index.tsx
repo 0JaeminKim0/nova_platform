@@ -1,34 +1,40 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { zValidator } from '@hono/zod-validator'
 import { DB } from './db'
+import { novaSuccess, novaError, novaNotFound, novaDuplicate, novaValidationError } from './response'
+import { DeployRequestSchema, DeployUpdateSchema, PocLinkCreateSchema } from './schemas'
 
 const app = new Hono()
 
 app.use('/api/*', cors())
 
+// ===== Global Error Handler =====
+app.onError((err, c) => {
+  console.error('❌ Unhandled error:', err.message)
+  return novaError(c, '서버 내부 오류가 발생했습니다.', 'INTERNAL_ERROR', 500)
+})
+
 // ===== API Routes =====
 
 // 산업군 목록 + 각 산업의 PoC 수
-app.get('/api/industries', async (c) => {
-
-  const industries = await DB.prepare(`
+app.get('/api/industries', (c) => {
+  const industries = DB.prepare(`
     SELECT i.*, 
       (SELECT COUNT(DISTINCT pvm.poc_id) FROM poc_value_chain_map pvm WHERE pvm.industry_id = i.id) as poc_count,
       (SELECT COUNT(*) FROM value_chain vc WHERE vc.industry_id = i.id) as vc_count
     FROM industry i WHERE i.is_active = 1 ORDER BY i.order_seq
   `).all()
-  return c.json({ success: true, data: industries.results })
+  return novaSuccess(c, industries.results, '산업군 목록 조회 성공')
 })
 
 // 특정 산업의 밸류체인 + 각 체인의 PoC 수
-app.get('/api/industries/:code/value-chains', async (c) => {
+app.get('/api/industries/:code/value-chains', (c) => {
   const code = c.req.param('code')
+  const industry = DB.prepare('SELECT * FROM industry WHERE code = ?').bind(code).first()
+  if (!industry) return novaNotFound(c, '산업군')
 
-  
-  const industry = await DB.prepare('SELECT * FROM industry WHERE code = ?').bind(code).first()
-  if (!industry) return c.json({ success: false, error: 'Industry not found' }, 404)
-
-  const chains = await DB.prepare(`
+  const chains = DB.prepare(`
     SELECT vc.*,
       (SELECT COUNT(*) FROM poc_value_chain_map pvm WHERE pvm.value_chain_id = vc.id) as poc_count
     FROM value_chain vc 
@@ -36,14 +42,12 @@ app.get('/api/industries/:code/value-chains', async (c) => {
     ORDER BY vc.order_seq
   `).bind((industry as any).id).all()
 
-  return c.json({ success: true, data: { industry, value_chains: chains.results } })
+  return novaSuccess(c, { industry, value_chains: chains.results }, '밸류체인 조회 성공')
 })
 
 // 전체 매트릭스 요약 (조감도용) — MUST be before :industryCode
-app.get('/api/matrix/summary', async (c) => {
-
-  
-  const summary = await DB.prepare(`
+app.get('/api/matrix/summary', (c) => {
+  const summary = DB.prepare(`
     SELECT i.id as industry_id, i.code as industry_code, i.name_ko, i.icon, i.color,
            vc.id as vc_id, vc.name as vc_name, vc.order_seq,
            COUNT(pvm.id) as poc_count,
@@ -59,22 +63,20 @@ app.get('/api/matrix/summary', async (c) => {
     ORDER BY i.order_seq, vc.order_seq
   `).all()
 
-  return c.json({ success: true, data: summary.results })
+  return novaSuccess(c, summary.results, '매트릭스 요약 조회 성공')
 })
 
 // 바둑판 매트릭스 데이터 — 특정 산업의 밸류체인별 PoC 전체
-app.get('/api/matrix/:industryCode', async (c) => {
+app.get('/api/matrix/:industryCode', (c) => {
   const code = c.req.param('industryCode')
+  const industry = DB.prepare('SELECT * FROM industry WHERE code = ?').bind(code).first()
+  if (!industry) return novaNotFound(c, '산업군')
 
-
-  const industry = await DB.prepare('SELECT * FROM industry WHERE code = ?').bind(code).first()
-  if (!industry) return c.json({ success: false, error: 'Industry not found' }, 404)
-
-  const chains = await DB.prepare(`
+  const chains = DB.prepare(`
     SELECT * FROM value_chain WHERE industry_id = ? ORDER BY order_seq
   `).bind((industry as any).id).all()
 
-  const mappings = await DB.prepare(`
+  const mappings = DB.prepare(`
     SELECT pvm.*, ap.poc_code, ap.name as poc_name, ap.category, ap.core_value,
            ap.tech_stack, ap.status as poc_status, ap.maturity_level, ap.description as poc_description,
            ap.demo_url, ap.config_schema as links_json,
@@ -86,7 +88,6 @@ app.get('/api/matrix/:industryCode', async (c) => {
     ORDER BY vc.order_seq, ap.poc_code
   `).bind((industry as any).id).all()
 
-  // 밸류체인별로 그룹핑
   const matrix: Record<string, any> = {}
   for (const chain of chains.results as any[]) {
     matrix[chain.id] = {
@@ -95,33 +96,28 @@ app.get('/api/matrix/:industryCode', async (c) => {
     }
   }
 
-  return c.json({ success: true, data: { industry, matrix } })
+  return novaSuccess(c, { industry, matrix }, '매트릭스 조회 성공')
 })
 
 // 전체 PoC 목록
-app.get('/api/pocs', async (c) => {
-
-  const pocs = await DB.prepare('SELECT * FROM agent_poc WHERE is_active = 1 ORDER BY poc_code').all()
-  return c.json({ success: true, data: pocs.results })
+app.get('/api/pocs', (c) => {
+  const pocs = DB.prepare('SELECT * FROM agent_poc WHERE is_active = 1 ORDER BY poc_code').all()
+  return novaSuccess(c, pocs.results, 'PoC 목록 조회 성공')
 })
 
 // PoC 상세
-app.get('/api/pocs/:code', async (c) => {
+app.get('/api/pocs/:code', (c) => {
   const code = c.req.param('code')
+  const poc = DB.prepare('SELECT * FROM agent_poc WHERE poc_code = ?').bind(code).first()
+  if (!poc) return novaNotFound(c, 'PoC')
 
-
-  const poc = await DB.prepare('SELECT * FROM agent_poc WHERE poc_code = ?').bind(code).first()
-  if (!poc) return c.json({ success: false, error: 'POC not found' }, 404)
-
-  const steps = await DB.prepare('SELECT * FROM agent_step WHERE poc_id = ? ORDER BY step_seq').bind((poc as any).id).all()
-  
-  const industries = await DB.prepare(`
+  const steps = DB.prepare('SELECT * FROM agent_step WHERE poc_id = ? ORDER BY step_seq').bind((poc as any).id).all()
+  const industries = DB.prepare(`
     SELECT i.*, pim.relevance 
     FROM poc_industry_map pim JOIN industry i ON pim.industry_id = i.id 
     WHERE pim.poc_id = ? ORDER BY pim.relevance DESC
   `).bind((poc as any).id).all()
-
-  const deployments = await DB.prepare(`
+  const deployments = DB.prepare(`
     SELECT pvm.*, vc.name as vc_name, i.name_ko as industry_name, i.code as industry_code
     FROM poc_value_chain_map pvm
     JOIN value_chain vc ON pvm.value_chain_id = vc.id
@@ -129,77 +125,76 @@ app.get('/api/pocs/:code', async (c) => {
     WHERE pvm.poc_id = ?
   `).bind((poc as any).id).all()
 
-  return c.json({ 
-    success: true, 
-    data: { ...poc, steps: steps.results, industries: industries.results, deployments: deployments.results }
-  })
+  return novaSuccess(c, { ...poc, steps: steps.results, industries: industries.results, deployments: deployments.results }, 'PoC 상세 조회 성공')
 })
 
-// 셀에 PoC 배포 (바둑판 칸에 서비스 등록)
-app.post('/api/matrix/deploy', async (c) => {
+// 셀에 PoC 배포 — Zod 검증 적용
+app.post('/api/matrix/deploy',
+  zValidator('json', DeployRequestSchema, (result, c) => {
+    if (!result.success) return novaValidationError(c, result.error.flatten())
+  }),
+  (c) => {
+    const body = c.req.valid('json')
+    const id = `map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
-  const body = await c.req.json()
-  const { poc_id, industry_id, value_chain_id, deploy_status, deploy_note } = body
+    try {
+      DB.prepare(`
+        INSERT INTO poc_value_chain_map (id, poc_id, industry_id, value_chain_id, deploy_status, deploy_note)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).bind(id, body.poc_id, body.industry_id, body.value_chain_id, body.deploy_status, body.deploy_note).run()
 
-  const id = `map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  
-  try {
-    await DB.prepare(`
-      INSERT INTO poc_value_chain_map (id, poc_id, industry_id, value_chain_id, deploy_status, deploy_note)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).bind(id, poc_id, industry_id, value_chain_id, deploy_status || 'registered', deploy_note || '').run()
+      const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      DB.prepare(`
+        INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, user_note)
+        VALUES (?, ?, ?, ?, 'deploy', ?)
+      `).bind(logId, body.poc_id, body.industry_id, body.value_chain_id, body.deploy_note).run()
 
-    // 배포 로그 기록
-    const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    await DB.prepare(`
-      INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, user_note)
-      VALUES (?, ?, ?, ?, 'deploy', ?)
-    `).bind(logId, poc_id, industry_id, value_chain_id, deploy_note || '').run()
-
-    return c.json({ success: true, data: { id } })
-  } catch (e: any) {
-    if (e.message?.includes('UNIQUE')) {
-      return c.json({ success: false, error: '이미 해당 셀에 등록된 PoC입니다.' }, 409)
+      return novaSuccess(c, { id }, '배포 성공', undefined, 201)
+    } catch (e: any) {
+      if (e.message?.includes('UNIQUE')) {
+        return novaDuplicate(c, 'PoC 배포')
+      }
+      throw e
     }
-    throw e
   }
-})
+)
 
 // 셀에서 PoC 제거
-app.delete('/api/matrix/deploy/:id', async (c) => {
-
+app.delete('/api/matrix/deploy/:id', (c) => {
   const id = c.req.param('id')
+  const existing = DB.prepare('SELECT * FROM poc_value_chain_map WHERE id = ?').bind(id).first()
+  if (!existing) return novaNotFound(c, '배포 매핑')
 
-  const existing = await DB.prepare('SELECT * FROM poc_value_chain_map WHERE id = ?').bind(id).first()
-  if (!existing) return c.json({ success: false, error: 'Not found' }, 404)
-
-  await DB.prepare('DELETE FROM poc_value_chain_map WHERE id = ?').bind(id).run()
+  DB.prepare('DELETE FROM poc_value_chain_map WHERE id = ?').bind(id).run()
 
   const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  await DB.prepare(`
+  DB.prepare(`
     INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, user_note)
     VALUES (?, ?, ?, ?, 'undeploy', 'Removed from matrix')
   `).bind(logId, (existing as any).poc_id, (existing as any).industry_id, (existing as any).value_chain_id).run()
 
-  return c.json({ success: true })
+  return novaSuccess(c, null, '배포 제거 성공')
 })
 
-// 배포 상태 업데이트
-app.patch('/api/matrix/deploy/:id', async (c) => {
+// 배포 상태 업데이트 — Zod 검증 적용
+app.patch('/api/matrix/deploy/:id',
+  zValidator('json', DeployUpdateSchema, (result, c) => {
+    if (!result.success) return novaValidationError(c, result.error.flatten())
+  }),
+  (c) => {
+    const id = c.req.param('id')
+    const body = c.req.valid('json')
 
-  const id = c.req.param('id')
-  const { deploy_status, deploy_note } = await c.req.json()
+    DB.prepare(`
+      UPDATE poc_value_chain_map SET deploy_status = ?, deploy_note = ?, deployed_at = datetime('now') WHERE id = ?
+    `).bind(body.deploy_status, body.deploy_note, id).run()
 
-  await DB.prepare(`
-    UPDATE poc_value_chain_map SET deploy_status = ?, deploy_note = ?, deployed_at = datetime('now') WHERE id = ?
-  `).bind(deploy_status, deploy_note || '', id).run()
-
-  return c.json({ success: true })
-})
+    return novaSuccess(c, null, '배포 상태 업데이트 성공')
+  }
+)
 
 // ZIP 업로드 또는 링크로 새 PoC 등록
 app.post('/api/pocs/upload', async (c) => {
-
   const contentType = c.req.header('content-type') || ''
   
   let name: string, category: string, description: string, core_value: string
@@ -208,19 +203,18 @@ app.post('/api/pocs/upload', async (c) => {
   let file: File | null = null
 
   if (contentType.includes('application/json')) {
-    // JSON body (링크 등록)
+    // JSON body — Zod 검증
     const body = await c.req.json()
-    name = body.name
-    category = body.category
-    description = body.description || ''
-    core_value = body.core_value || ''
-    tech_stack = body.tech_stack || ''
-    industry_ids = body.industry_ids || ''
-    value_chain_ids = body.value_chain_ids || ''
-    deploy_status = body.deploy_status || 'registered'
-    demo_url = body.demo_url || ''
-    repo_url = body.repo_url || ''
-    doc_url = body.doc_url || ''
+    const parsed = PocLinkCreateSchema.safeParse(body)
+    if (!parsed.success) {
+      return novaValidationError(c, parsed.error.flatten())
+    }
+    const data = parsed.data
+    name = data.name; category = data.category; description = data.description
+    core_value = data.core_value; tech_stack = data.tech_stack
+    industry_ids = data.industry_ids; value_chain_ids = data.value_chain_ids
+    deploy_status = data.deploy_status; demo_url = data.demo_url
+    repo_url = data.repo_url; doc_url = data.doc_url
   } else {
     // FormData (ZIP 업로드)
     const formData = await c.req.formData()
@@ -239,11 +233,11 @@ app.post('/api/pocs/upload', async (c) => {
   }
 
   if (!name || !category) {
-    return c.json({ success: false, error: 'name과 category는 필수입니다.' }, 400)
+    return novaError(c, 'name과 category는 필수입니다.', 'MISSING_REQUIRED_FIELD', 400)
   }
 
   // Generate poc_code
-  const countResult = await DB.prepare('SELECT COUNT(*) as cnt FROM agent_poc').first() as any
+  const countResult = DB.prepare('SELECT COUNT(*) as cnt FROM agent_poc').first() as any
   const nextNum = (countResult?.cnt || 14) + 1
   const pocCode = `POC-${String(nextNum).padStart(3, '0')}`
   const pocId = `poc-${String(nextNum).padStart(3, '0')}`
@@ -252,35 +246,31 @@ app.post('/api/pocs/upload', async (c) => {
     ? JSON.stringify(tech_stack.split(',').map((s: string) => s.trim()))
     : '[]'
 
-  // 링크 정보를 config_schema에 저장
   const linksJson = JSON.stringify({ demo_url, repo_url, doc_url })
 
-  // Insert PoC
-  await DB.prepare(`
+  DB.prepare(`
     INSERT INTO agent_poc (id, poc_code, name, category, description, core_value, tech_stack, status, maturity_level, demo_url, config_schema, is_active)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
   `).bind(pocId, pocCode, name, category, description, core_value, techStackJson, deploy_status, demo_url, linksJson).run()
 
-  // Insert industry mappings
   if (industry_ids) {
     const ids = industry_ids.split(',').map(s => s.trim())
     for (const indId of ids) {
-      await DB.prepare(`
+      DB.prepare(`
         INSERT OR IGNORE INTO poc_industry_map (poc_id, industry_id, relevance) VALUES (?, ?, 3)
       `).bind(pocId, indId).run()
     }
   }
 
-  // Insert value chain mappings (deploy to matrix cells)
   if (value_chain_ids && industry_ids) {
     const vcIds = value_chain_ids.split(',').map(s => s.trim())
     const indIds = industry_ids.split(',').map(s => s.trim())
     for (const indId of indIds) {
       for (const vcId of vcIds) {
-        const vc = await DB.prepare('SELECT id FROM value_chain WHERE id = ? AND industry_id = ?').bind(vcId, indId).first()
+        const vc = DB.prepare('SELECT id FROM value_chain WHERE id = ? AND industry_id = ?').bind(vcId, indId).first()
         if (vc) {
           const mapId = `map-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-          await DB.prepare(`
+          DB.prepare(`
             INSERT OR IGNORE INTO poc_value_chain_map (id, poc_id, industry_id, value_chain_id, deploy_status)
             VALUES (?, ?, ?, ?, ?)
           `).bind(mapId, pocId, indId, vcId, deploy_status).run()
@@ -289,7 +279,6 @@ app.post('/api/pocs/upload', async (c) => {
     }
   }
 
-  // Log
   let fileInfo = null
   const logAction = file ? 'upload' : (demo_url || repo_url || doc_url) ? 'link' : 'register'
   if (file) {
@@ -297,22 +286,18 @@ app.post('/api/pocs/upload', async (c) => {
   }
   const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const logMeta = JSON.stringify({ file: fileInfo, demo_url, repo_url, doc_url })
-  await DB.prepare(`
+  DB.prepare(`
     INSERT INTO deployment_log (id, poc_id, industry_id, value_chain_id, action, file_name, file_size, metadata)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(logId, pocId, industry_ids?.split(',')[0] || '', value_chain_ids?.split(',')[0] || '',
     logAction, file?.name || demo_url || '', file?.size || 0, logMeta).run()
 
-  return c.json({ 
-    success: true, 
-    data: { poc_id: pocId, poc_code: pocCode, file: fileInfo, links: { demo_url, repo_url, doc_url } }
-  })
+  return novaSuccess(c, { poc_id: pocId, poc_code: pocCode, file: fileInfo, links: { demo_url, repo_url, doc_url } }, 'PoC 등록 성공', undefined, 201)
 })
 
 // 배포 이력 조회
-app.get('/api/deployments', async (c) => {
-
-  const logs = await DB.prepare(`
+app.get('/api/deployments', (c) => {
+  const logs = DB.prepare(`
     SELECT dl.*, ap.poc_code, ap.name as poc_name, i.name_ko as industry_name, vc.name as vc_name
     FROM deployment_log dl
     LEFT JOIN agent_poc ap ON dl.poc_id = ap.id
@@ -320,7 +305,13 @@ app.get('/api/deployments', async (c) => {
     LEFT JOIN value_chain vc ON dl.value_chain_id = vc.id
     ORDER BY dl.created_at DESC LIMIT 50
   `).all()
-  return c.json({ success: true, data: logs.results })
+  return novaSuccess(c, logs.results, '배포 이력 조회 성공')
+})
+
+// 마이그레이션 상태 조회
+app.get('/api/system/migrations', (c) => {
+  const migrations = DB.prepare('SELECT version, name, checksum, applied_at FROM _nova_migrations ORDER BY version').all()
+  return novaSuccess(c, migrations.results, '마이그레이션 상태 조회 성공')
 })
 
 // ===== HTML 페이지 =====
@@ -981,7 +972,7 @@ const app = {
       else this.renderMatrix();
       if (industryCode) await this.drilldown(industryCode);
     } else {
-      alert(json.error || '등록 실패');
+      alert(json.message || json.error || '등록 실패');
     }
   },
 
@@ -1241,7 +1232,7 @@ const app = {
       if (this.expandedIndustry) await this.drilldown(this.expandedIndustry);
       alert(\`\\u2705 \${json.data.poc_code} 등록 완료!\`);
     } else {
-      alert(json.error || '등록 실패');
+      alert(json.message || json.error || '등록 실패');
     }
   },
 

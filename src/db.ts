@@ -1,6 +1,10 @@
+// ===== NOVA Database Layer =====
+// better-sqlite3 기반, D1 호환 인터페이스 + 마이그레이션 시스템
+
 import Database from 'better-sqlite3'
 import path from 'path'
 import fs from 'fs'
+import { runMigrations, getMigrationStatus } from './migrate'
 
 const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'nova.db')
 
@@ -15,8 +19,6 @@ db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
 
 // ===== D1-compatible wrapper =====
-// Wraps better-sqlite3 to mimic the D1 .prepare().bind().all/first/run pattern
-
 export const DB = {
   prepare(sql: string) {
     const stmt = db.prepare(sql)
@@ -46,28 +48,26 @@ export const DB = {
   }
 }
 
-// ===== Initialize schema & seed =====
+// ===== Initialize: Migrations + Seed =====
 export function initializeDatabase() {
-  const migrationPath = path.join(process.cwd(), 'migrations', '0001_initial_schema.sql')
+  const migrationsDir = path.join(process.cwd(), 'migrations')
   const seedPath = path.join(process.cwd(), 'seed.sql')
 
-  // Check if tables exist
-  const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='industry'").get()
-  
-  if (!tableCheck) {
-    console.log('🗄️  Initializing database schema...')
-    if (fs.existsSync(migrationPath)) {
-      const migration = fs.readFileSync(migrationPath, 'utf-8')
-      db.exec(migration)
-      console.log('✅ Schema created')
-    }
+  // 마이그레이션 실행 (Alembic 패턴)
+  console.log('🗄️  Running migrations...')
+  runMigrations(db, migrationsDir)
 
-    if (fs.existsSync(seedPath)) {
-      const seed = fs.readFileSync(seedPath, 'utf-8')
-      db.exec(seed)
-      console.log('✅ Seed data loaded')
-    }
-  } else {
-    console.log('🗄️  Database already initialized')
+  // 시드 데이터: industry 테이블이 비어있으면 적용
+  const hasData = db.prepare('SELECT COUNT(*) as cnt FROM industry').get() as any
+  if (hasData?.cnt === 0 && fs.existsSync(seedPath)) {
+    console.log('🌱 Seeding initial data...')
+    const seed = fs.readFileSync(seedPath, 'utf-8')
+    db.exec(seed)
+    console.log('✅ Seed data loaded')
   }
+
+  // 마이그레이션 상태 출력
+  const status = getMigrationStatus(db)
+  console.log(`📋 Applied migrations: ${status.length}`)
+  status.forEach(m => console.log(`   ✓ ${m.version} (${m.applied_at})`))
 }
