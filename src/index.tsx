@@ -607,6 +607,16 @@ function getStyleCSS(): string {
   font-size: 11px;
   font-weight: 500;
 }
+
+/* Select dropdown - option 검은 글씨 */
+.select-dark option {
+  background: #1e293b;
+  color: #111;
+}
+.select-dark option:checked {
+  background: #2563eb;
+  color: #fff;
+}
 `
 }
 
@@ -915,7 +925,7 @@ const app = {
         
         <div class="mb-4">
           <label class="text-sm text-white/60 mb-2 block">기존 PoC 선택</label>
-          <select id="deploy-poc-select" class="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm">
+          <select id="deploy-poc-select" class="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-sm select-dark">
             <option value="">— PoC를 선택하세요 —</option>
             \${app.allPocs.map(p => \`<option value="\${p.id}">\${p.poc_code} — \${p.name} (\${p.category})</option>\`).join('')}
           </select>
@@ -1051,7 +1061,7 @@ const app = {
           </div>
           <div>
             <label class="text-xs text-white/60 mb-1 block">카테고리 *</label>
-            <select id="up-category" class="w-full bg-white/5 border border-white/10 rounded-lg p-2.5 text-sm">
+            <select id="up-category" class="w-full bg-white/5 border border-white/10 rounded-lg p-2.5 text-sm select-dark">
               <option value="문서/지식 생성">문서/지식 생성</option>
               <option value="현장 실행 지원">현장 실행 지원</option>
               <option value="데이터 해석">데이터 해석</option>
